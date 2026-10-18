@@ -90,7 +90,7 @@ jobs:
           cp .env.example .env
           php artisan key:generate --no-interaction
           npm ci
-          npm test
+          LARAVEL_BYPASS_ENV_CHECK=1 npm test
           npm run build
           php artisan test --compact
           composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
