@@ -14,7 +14,7 @@ on:
         required: true
       user:
         type: string
-        default: deploy
+        required: true
       port:
         type: number
         default: 22
@@ -27,9 +27,6 @@ on:
       keep-releases:
         type: number
         default: 3
-      web-user:
-        type: string
-        default: www-data
     secrets:
       ssh-key:
         required: true
@@ -56,7 +53,6 @@ jobs:
       DEPLOY_PORT: ${{ inputs.port }}
       PHP_VERSION: ${{ inputs.php-version }}
       KEEP_RELEASES: ${{ inputs.keep-releases }}
-      WEB_USER: ${{ inputs.web-user }}
       COMPOSER_NO_INTERACTION: '1'
 
     steps:
@@ -134,7 +130,8 @@ jobs:
 
           connect "mkdir '$release_path'"
           created=true
-          rsync -rlptz \
+          connect "cp -a '$PROJECT_PATH/.release-template/.' '$release_path/'"
+          rsync -rltz --no-perms --chmod=ugo=rwX \
             --exclude='/.git/' --exclude='/.github/' \
             --exclude='/.env*' --exclude='/auth.json' \
             --exclude='/node_modules/' --exclude='/tests/' \
@@ -143,13 +140,12 @@ jobs:
             --exclude='/public/storage' --exclude='/public/hot' \
             ./ "$remote:$release_path/"
 
-          connect bash -s -- "$PROJECT_PATH" "$release" "$PHP_VERSION" "$KEEP_RELEASES" "$WEB_USER" <<'REMOTE'
+          connect bash -s -- "$PROJECT_PATH" "$release" "$PHP_VERSION" "$KEEP_RELEASES" <<'REMOTE'
           set -euo pipefail
           project=$1
           release="$project/releases/$2"
           php="/usr/bin/php$3"
           keep=$4
-          web_user=$5
           exec 9>"$project/.deploy.lock"
           flock -w 300 9
           cd "$release"
@@ -161,10 +157,6 @@ jobs:
             ln -s "$source" "$target"
           done
           mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
-          setfacl -Rm "u:$web_user:r-X,g:$web_user:r-X" "$release"
-          setfacl -Rm "u:$web_user:rwX,g:$web_user:rwX" storage/ bootstrap/cache/
-          setfacl -Rdm "u:$web_user:rwx,g:$web_user:rwx" storage/ bootstrap/cache/
-          setfacl -m "u:$web_user:r,g:$web_user:r" "$project/shared/.env"
 
           "$php" artisan package:discover --no-interaction
           "$php" artisan storage:link --no-interaction
