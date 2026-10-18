@@ -33,16 +33,14 @@ on:
       install-commands:
         description: 'Dependency installation before caching. CACHE_HIT is true when dependencies were restored. Use an empty string to skip.'
         type: string
-        default: |
-          composer install --prefer-dist --no-progress
-          if [[ "$CACHE_HIT" != true ]]; then npm ci; fi
+        default: ''
       test-commands:
         type: string
         required: true
       after-test-commands:
         description: 'Commands after successful tests and before upload. Use an empty string to skip.'
         type: string
-        default: composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
+        default: ''
       before-activation:
         type: string
         default: ''

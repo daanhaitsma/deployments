@@ -8,8 +8,12 @@ source = (Path(__file__).resolve().parents[1] / '.github/workflows/laravel.yml')
 install = textwrap.dedent(source.split('      - name: Install dependencies\n', 1)[1].split('        run: |\n', 1)[1].split('\n      - uses:', 1)[0])
 pipeline = textwrap.dedent(source.split('      - name: Test and build\n', 1)[1].split('        run: |\n', 1)[1].split('\n      - uses:', 1)[0])
 defaults = source.split('      install-commands:\n', 1)[1].split('      test-commands:', 1)[0]
-default_install = textwrap.dedent(defaults.split('        default: |\n', 1)[1])
-default_after = source.split('      after-test-commands:\n', 1)[1].split('        default: ', 1)[1].split('\n', 1)[0]
+default_install = defaults.split('        default: ', 1)[1].split('\n', 1)[0].strip("'")
+default_after = source.split('      after-test-commands:\n', 1)[1].split('        default: ', 1)[1].split('\n', 1)[0].strip("'")
+assert default_install == default_after == ''
+assert 'composer install' not in source and 'npm ci' not in source
+laravel_install = 'composer install --prefer-dist --no-progress\nif [[ "$CACHE_HIT" != true ]]; then npm ci; fi'
+laravel_after = 'composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts'
 assert source.index('uses: actions/cache/save@v5') < source.index('- name: Test and build')
 assert "hashFiles('composer.lock', 'composer.json', 'package-lock.json', 'package.json')" in source
 assert 'steps.runtime.outputs.php' in source and 'steps.runtime.outputs.node' in source
@@ -19,7 +23,7 @@ runtime = textwrap.dedent(source.split('      - name: Runtime cache key\n', 1)[1
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     keys = []
-    for commands in [default_install, 'npm ci', '']:
+    for commands in [laravel_install, 'npm ci', default_install]:
         output = root / str(len(keys))
         env = dict(os.environ, INSTALL_COMMANDS=commands, GITHUB_OUTPUT=str(output))
         subprocess.run(['bash', '-euo', 'pipefail'], input=runtime, text=True, env=env, check=True)
@@ -35,14 +39,14 @@ for hit in ['true', 'false']:
             executable.write_text('#!/bin/bash\necho "${0##*/} $*" >> "$COMMAND_LOG"\n')
             executable.chmod(0o755)
         log = root / 'commands'
-        env = dict(os.environ, PATH=f'{root}:' + os.environ['PATH'], CACHE_HIT=hit, COMMAND_LOG=str(log), INSTALL_COMMANDS=default_install)
+        env = dict(os.environ, PATH=f'{root}:' + os.environ['PATH'], CACHE_HIT=hit, COMMAND_LOG=str(log), INSTALL_COMMANDS=laravel_install)
         subprocess.run(['bash', '-euo', 'pipefail'], input=install, text=True, env=env, check=True)
         commands = log.read_text()
         assert 'composer install' in commands
         assert ('npm ci' in commands) == (hit == 'false')
         print('PASS dependencies cache-hit=' + hit)
 
-for case in ['defaults', 'static', 'custom', 'install_failure', 'test_failure', 'cleanup_failure', 'pipeline_failure']:
+for case in ['defaults', 'laravel', 'custom', 'install_failure', 'test_failure', 'cleanup_failure', 'pipeline_failure']:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         for command in ['composer', 'npm']:
@@ -53,14 +57,15 @@ for case in ['defaults', 'static', 'custom', 'install_failure', 'test_failure', 
         install_commands = default_install
         tests = 'echo tested >> "$COMMAND_LOG"'
         after = default_after
-        if case == 'static':
-            install_commands = after = ''
+        if case == 'laravel':
+            install_commands, after = laravel_install, laravel_after
         elif case == 'custom':
             install_commands = 'printf "%s\\n" \'custom install: "quoted"\' >> "$COMMAND_LOG"'
             after = 'printf "%s\\n" \'custom cleanup: $literal\' >> "$COMMAND_LOG"'
         elif case == 'install_failure':
             install_commands = 'exit 17\necho should-not-run >> "$COMMAND_LOG"'
         elif case == 'test_failure':
+            install_commands, after = laravel_install, laravel_after
             tests = 'exit 18\necho should-not-run >> "$COMMAND_LOG"'
         elif case == 'cleanup_failure':
             after = 'exit 19\necho should-not-run >> "$COMMAND_LOG"'
@@ -73,9 +78,9 @@ for case in ['defaults', 'static', 'custom', 'install_failure', 'test_failure', 
         commands = log.read_text() if log.exists() else ''
         assert 'should-not-run' not in commands
         if case == 'defaults':
-            assert commands.splitlines() == ['composer install --prefer-dist --no-progress', 'npm ci', 'tested', default_after]
-        elif case == 'static':
             assert commands.splitlines() == ['tested']
+        elif case == 'laravel':
+            assert commands.splitlines() == ['composer install --prefer-dist --no-progress', 'npm ci', 'tested', laravel_after]
         elif case == 'custom':
             assert commands.splitlines() == ['custom install: "quoted"', 'tested', 'custom cleanup: $literal']
         elif case in ['install_failure', 'pipeline_failure']:
