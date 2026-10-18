@@ -27,6 +27,12 @@ on:
       keep-releases:
         type: number
         default: 3
+      exclude-paths:
+        type: string
+        default: |
+          /node_modules/
+          /tests/
+          /.phpunit*
       test-commands:
         type: string
         required: true
@@ -62,6 +68,7 @@ jobs:
       DEPLOY_PORT: ${{ inputs.port }}
       BEFORE_ACTIVATION: ${{ inputs.before-activation }}
       AFTER_ACTIVATION: ${{ inputs.after-activation }}
+      EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
       KEEP_RELEASES: ${{ inputs.keep-releases }}
       COMPOSER_NO_INTERACTION: '1'
 
@@ -166,11 +173,14 @@ jobs:
           connect "mkdir '$release_path'"
           created=true
           connect "cp -a '$PROJECT_PATH/.release-template/.' '$release_path/'"
-          rsync -rltz --no-perms --chmod=ugo=rwX \
+          exclude_args=()
+          while IFS= read -r pattern; do
+            [[ -z "$pattern" ]] || exclude_args+=("--exclude=$pattern")
+          done <<< "$EXCLUDE_PATHS"
+          rsync -rltz --no-perms --chmod=ugo=rwX "${exclude_args[@]}" \
             --exclude='/.git/' --exclude='/.github/' \
             --exclude='/.env*' --exclude='/auth.json' \
-            --exclude='/node_modules/' --exclude='/tests/' \
-            --exclude='/.phpunit*' --exclude='/storage/' \
+            --exclude='/storage/' \
             --exclude='/bootstrap/cache/*.php' \
             --exclude='/public/storage' --exclude='/public/hot' \
             ./ "$remote:$release_path/"
