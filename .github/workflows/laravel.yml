@@ -163,6 +163,7 @@ jobs:
           "$php" artisan migrate --force --no-interaction
           ln -s "$release" "$project/.current-$2"
           mv -Tf "$project/.current-$2" "$project/current"
+          "$php" artisan queue:restart --no-interaction
 
           # Keep the active release plus the configured number of previous releases.
           active=$(readlink -f "$project/current")
