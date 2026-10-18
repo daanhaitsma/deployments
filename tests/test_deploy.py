@@ -1,0 +1,63 @@
+import pathlib
+import subprocess
+import tempfile
+import os
+import textwrap
+
+workflow = pathlib.Path(__file__).resolve().parents[1] / '.github/workflows/laravel.yml'
+source = workflow.read_text()
+script = textwrap.dedent(source.split('      - name: Deploy\n        run: |\n', 1)[1])
+assert '  workflow_call:' in source
+assert '  push:' not in source
+assert subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True).returncode == 0
+remote = script.split("<<'REMOTE'\n")[1].rsplit('\nREMOTE', 1)[0]
+assert subprocess.run(['bash', '-n'], input=remote, text=True, capture_output=True).returncode == 0
+
+for case in ['success','shared_vendor','upload_failure','migration_failure','activation_failure','collision','keep_one','keep_five']:
+  with tempfile.TemporaryDirectory() as td:
+    base=pathlib.Path(td); project=base/'project'; binary=base/'bin'; binary.mkdir()
+    (project/'shared/storage').mkdir(parents=True)
+    (project/'shared/.env').write_text('SECRET=unchanged\n')
+    (project/'shared/storage/upload').write_text('keep upload')
+    (project/'releases/20261001000000_1/public').mkdir(parents=True)
+    (project/'current').symlink_to(project/'releases/20261001000000_1')
+    for n in ['20261002000000_2','gha-123-1-abcdef012345','20261003000000']:
+      (project/'releases'/n).mkdir()
+    if case=='shared_vendor':
+      (project/'shared/vendor').mkdir()
+      (project/'shared/vendor/autoload.php').write_text('shared vendor')
+    rid='20261018123000'; release=project/'releases'/rid
+    if case=='collision':
+      release.mkdir(); (release/'sentinel').write_text('existing')
+    files={
+      'date':'#!/bin/bash\necho 20261018123000\n',
+      'ssh':'#!/bin/bash\nwhile [[ \"$1\" == -* ]]; do shift 2; done\nshift\nif [[ "$1" == bash ]]; then exec "$@"; else exec bash -c "$1"; fi\n',
+      'setfacl':'#!/bin/bash\nexit 0\n',
+      'php':'#!/bin/bash\nif [[ "$CASE" == migration_failure && "$*" == *"artisan migrate"* ]]; then exit 42; fi\n',
+      'mv':'#!/bin/bash\n/usr/bin/mv "$@" || exit $?\nif [[ "$CASE" == activation_failure ]]; then exit 43; fi\n',
+      'rsync':'''#!/usr/bin/env python3
+import os,pathlib,sys
+if os.environ['CASE']=='upload_failure': sys.exit(23)
+p=pathlib.Path(sys.argv[-1].split(':',1)[1]); (p/'public').mkdir(); (p/'vendor').mkdir(); (p/'vendor/autoload.php').write_text('built vendor'); (p/'bootstrap/cache').mkdir(parents=True)
+'''
+    }
+    for name,content in files.items():
+      p=binary/name; p.write_text(content); p.chmod(0o755)
+    env=dict(os.environ,PATH=str(binary)+':'+os.environ['PATH'],CASE=case,DEPLOY_USER='deploy',DEPLOY_HOST='fake',PROJECT_PATH=str(project),DEPLOY_PORT='22',PHP_VERSION='8.5',WEB_USER='www-data',KEEP_RELEASES='1' if case=='keep_one' else '5' if case=='keep_five' else '3',MOCK_PHP=str(binary/'php'))
+    result=subprocess.run(['bash'],input=script.replace('php="/usr/bin/php$3"', 'php="$MOCK_PHP"'),text=True,capture_output=True,env=env)
+    expected={'success':0,'shared_vendor':0,'upload_failure':23,'migration_failure':42,'activation_failure':43,'collision':1,'keep_one':0,'keep_five':0}[case]
+    assert result.returncode==expected,(case,result.returncode,result.stderr)
+    switched=case in ['success','shared_vendor','activation_failure','keep_one','keep_five']
+    assert (project/'current').resolve()==(release if switched else project/'releases/20261001000000_1'),case
+    assert (project/'shared/.env').read_text()=='SECRET=unchanged\n'
+    assert (project/'shared/storage/upload').read_text()=='keep upload'
+    if case in ['upload_failure','migration_failure']:
+      assert not release.exists(),case
+    if case=='collision': assert (release/'sentinel').read_text()=='existing'
+    if case in ['success','shared_vendor','keep_one','keep_five']:
+      assert len(list((project/'releases').iterdir()))==int(env['KEEP_RELEASES'])
+      assert (release/'.env').resolve()==project/'shared/.env'
+      assert (release/'storage').resolve()==project/'shared/storage'
+      assert (release/'vendor/autoload.php').read_text()==('shared vendor' if case=='shared_vendor' else 'built vendor')
+    print('PASS',case)
+print('PASS workflow and remote Bash syntax')

@@ -1,0 +1,184 @@
+name: Deploy Laravel
+
+on:
+  workflow_call:
+    inputs:
+      host:
+        type: string
+        required: true
+      path:
+        type: string
+        required: true
+      known-hosts:
+        type: string
+        required: true
+      user:
+        type: string
+        default: deploy
+      port:
+        type: number
+        default: 22
+      php-version:
+        type: string
+        default: '8.5'
+      node-version:
+        type: string
+        default: '24'
+      keep-releases:
+        type: number
+        default: 3
+      web-user:
+        type: string
+        default: www-data
+    secrets:
+      ssh-key:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.host }}-${{ inputs.path }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DEPLOY_HOST: ${{ inputs.host }}
+      DEPLOY_USER: ${{ inputs.user }}
+      PROJECT_PATH: ${{ inputs.path }}
+      DEPLOY_PORT: ${{ inputs.port }}
+      PHP_VERSION: ${{ inputs.php-version }}
+      KEEP_RELEASES: ${{ inputs.keep-releases }}
+      WEB_USER: ${{ inputs.web-user }}
+      COMPOSER_NO_INTERACTION: '1'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+          extensions: mbstring, dom, curl, fileinfo, pdo_mysql, pdo_sqlite, gd, exif, zip, intl, bcmath
+          tools: composer:v2
+          coverage: none
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - uses: ramsey/composer-install@v4
+        with:
+          composer-options: --prefer-dist
+
+      - name: Test and build
+        env:
+          APP_ENV: testing
+          CACHE_STORE: array
+          SESSION_DRIVER: array
+          QUEUE_CONNECTION: sync
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ':memory:'
+          MAIL_MAILER: array
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          php artisan key:generate --no-interaction
+          npm ci
+          npm test
+          npm run build
+          php artisan test --compact
+          composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          rm -f .env bootstrap/cache/*.php
+
+      - uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.ssh-key }}
+
+      - name: Register server host key
+        env:
+          KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          remote="$DEPLOY_USER@$DEPLOY_HOST"
+          [[ "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]]
+          connect() { ssh -p "$DEPLOY_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes "$remote" "$@"; }
+          export RSYNC_RSH="ssh -p $DEPLOY_PORT -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          release=$(date -u +%Y%m%d%H%M%S)
+          release_path="$PROJECT_PATH/releases/$release"
+          created=false
+
+          cleanup() {
+            status=$?
+            if [[ $status -ne 0 && $created == true ]]; then
+              connect "if [ \"\$(readlink -f '$PROJECT_PATH/current')\" != '$release_path' ]; then rm -rf -- '$release_path'; fi" || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          connect "mkdir '$release_path'"
+          created=true
+          rsync -rlptz \
+            --exclude='/.git/' --exclude='/.github/' \
+            --exclude='/.env*' --exclude='/auth.json' \
+            --exclude='/node_modules/' --exclude='/tests/' \
+            --exclude='/.phpunit*' --exclude='/storage/' \
+            --exclude='/bootstrap/cache/*.php' \
+            --exclude='/public/storage' --exclude='/public/hot' \
+            ./ "$remote:$release_path/"
+
+          connect bash -s -- "$PROJECT_PATH" "$release" "$PHP_VERSION" "$KEEP_RELEASES" "$WEB_USER" <<'REMOTE'
+          set -euo pipefail
+          project=$1
+          release="$project/releases/$2"
+          php="/usr/bin/php$3"
+          keep=$4
+          web_user=$5
+          exec 9>"$project/.deploy.lock"
+          flock -w 300 9
+          cd "$release"
+
+          shopt -s dotglob nullglob
+          for source in "$project/shared/"*; do
+            target="$release/${source##*/}"
+            rm -rf -- "$target"
+            ln -s "$source" "$target"
+          done
+          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
+          setfacl -Rm "u:$web_user:r-X,g:$web_user:r-X" "$release"
+          setfacl -Rm "u:$web_user:rwX,g:$web_user:rwX" storage/ bootstrap/cache/
+          setfacl -Rdm "u:$web_user:rwx,g:$web_user:rwx" storage/ bootstrap/cache/
+          setfacl -m "u:$web_user:r,g:$web_user:r" "$project/shared/.env"
+
+          "$php" artisan package:discover --no-interaction
+          "$php" artisan storage:link --no-interaction
+          "$php" artisan migrate --force --no-interaction
+          ln -s "$release" "$project/.current-$2"
+          mv -Tf "$project/.current-$2" "$project/current"
+
+          # Keep the active release plus the configured number of previous releases.
+          active=$(readlink -f "$project/current")
+          mapfile -t old < <(
+            find "$project/releases" -mindepth 1 -maxdepth 1 -type d \
+              ! -path "$active" -printf '%T@ %f\n' | sort -nr | cut -d ' ' -f 2-
+          )
+          for name in "${old[@]:$((keep - 1))}"; do
+            rm -rf -- "$project/releases/$name"
+          done
+          REMOTE
