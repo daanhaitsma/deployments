@@ -34,7 +34,7 @@ for case in ['success','shared_vendor','upload_failure','migration_failure','act
       release.mkdir(); (release/'sentinel').write_text('existing')
     files={
       'date':'#!/bin/bash\necho 20261018123000\n',
-      'ssh':'#!/bin/bash\nwhile [[ \"$1\" == -* ]]; do shift 2; done\nshift\nif [[ "$1" == bash ]]; then exec "$@"; else exec bash -c "$1"; fi\n',
+      'ssh':'#!/bin/bash\nfor arg in \"$@\"; do if [[ \"$arg\" == -MNf || \"$arg\" == -O ]]; then exit 0; fi; done\nwhile [[ \"$1\" == -* ]]; do shift 2; done\nshift\nif [[ "$1" == bash ]]; then exec "$@"; else exec bash -c "$1"; fi\n',
       'php':'#!/bin/bash\nif [[ "$*" == *"artisan queue:restart"* ]]; then [[ "$(readlink -f "$PROJECT_PATH/current")" == "$PWD" ]] || exit 45; echo restarted > "$PROJECT_PATH/restart-observed"; if [[ "$CASE" == restart_failure ]]; then exit 44; fi; fi\nif [[ "$CASE" == migration_failure && "$*" == *"artisan migrate"* ]]; then exit 42; fi\n',
       'mv':'#!/bin/bash\n/usr/bin/mv "$@" || exit $?\nif [[ "$CASE" == activation_failure ]]; then exit 43; fi\n',
       'rsync':'''#!/usr/bin/env python3

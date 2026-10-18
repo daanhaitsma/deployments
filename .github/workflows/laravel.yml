@@ -80,11 +80,35 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
 
-      - uses: ramsey/composer-install@v4
+      - name: Runtime cache key
+        id: runtime
+        run: |
+          echo "php=$(php -r 'echo PHP_VERSION;')" >> "$GITHUB_OUTPUT"
+          echo "node=$(node --version)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v5
+        id: dependencies
         with:
-          composer-options: --prefer-dist
+          path: |
+            vendor
+            node_modules
+          key: dependencies-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.php }}-${{ steps.runtime.outputs.node }}-${{ hashFiles('composer.lock', 'composer.json', 'package-lock.json', 'package.json') }}
+
+      - name: Install dependencies
+        env:
+          CACHE_HIT: ${{ steps.dependencies.outputs.cache-hit }}
+        run: |
+          composer install --prefer-dist --no-progress
+          if [[ "$CACHE_HIT" != true ]]; then npm ci; fi
+
+      - uses: actions/cache/save@v5
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        with:
+          path: |
+            vendor
+            node_modules
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
 
       - name: Test and build
         env:
@@ -98,7 +122,6 @@ jobs:
           MAIL_MAILER: array
         run: |
           set -euo pipefail
-          npm ci
           bash -euv -o pipefail <<< "$TEST_COMMANDS"
           composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
           rm -f .env bootstrap/cache/*.php
@@ -120,8 +143,11 @@ jobs:
           set -euo pipefail
           remote="$DEPLOY_USER@$DEPLOY_HOST"
           [[ "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]]
-          connect() { ssh -p "$DEPLOY_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes "$remote" "$@"; }
-          export RSYNC_RSH="ssh -p $DEPLOY_PORT -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          socket="${RUNNER_TEMP:-/tmp}/deploy-ssh-$$"
+          ssh_options=(-p "$DEPLOY_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes -o ControlMaster=auto -o "ControlPath=$socket" -o ControlPersist=60)
+          connect() { ssh "${ssh_options[@]}" "$remote" "$@"; }
+          printf -v RSYNC_RSH 'ssh'; for option in "${ssh_options[@]}"; do printf -v RSYNC_RSH '%s %q' "$RSYNC_RSH" "$option"; done
+          export RSYNC_RSH
           release=$(date -u +%Y%m%d%H%M%S)
           release_path="$PROJECT_PATH/releases/$release"
           created=false
@@ -131,10 +157,12 @@ jobs:
             if [[ $status -ne 0 && $created == true ]]; then
               connect "if [ \"\$(readlink -f '$PROJECT_PATH/current')\" != '$release_path' ]; then rm -rf -- '$release_path'; fi" || true
             fi
+            ssh "${ssh_options[@]}" -O exit "$remote" >/dev/null 2>&1 || true
             exit "$status"
           }
           trap cleanup EXIT
 
+          ssh "${ssh_options[@]}" -MNf "$remote"
           connect "mkdir '$release_path'"
           created=true
           connect "cp -a '$PROJECT_PATH/.release-template/.' '$release_path/'"
