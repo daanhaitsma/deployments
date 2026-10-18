@@ -27,6 +27,15 @@ on:
       keep-releases:
         type: number
         default: 3
+      test-commands:
+        type: string
+        required: true
+      before-activation:
+        type: string
+        default: ''
+      after-activation:
+        type: string
+        default: ''
     secrets:
       ssh-key:
         required: true
@@ -51,7 +60,8 @@ jobs:
       DEPLOY_USER: ${{ inputs.user }}
       PROJECT_PATH: ${{ inputs.path }}
       DEPLOY_PORT: ${{ inputs.port }}
-      PHP_VERSION: ${{ inputs.php-version }}
+      BEFORE_ACTIVATION: ${{ inputs.before-activation }}
+      AFTER_ACTIVATION: ${{ inputs.after-activation }}
       KEEP_RELEASES: ${{ inputs.keep-releases }}
       COMPOSER_NO_INTERACTION: '1'
 
@@ -78,6 +88,7 @@ jobs:
 
       - name: Test and build
         env:
+          TEST_COMMANDS: ${{ inputs.test-commands }}
           APP_ENV: testing
           CACHE_STORE: array
           SESSION_DRIVER: array
@@ -87,12 +98,8 @@ jobs:
           MAIL_MAILER: array
         run: |
           set -euo pipefail
-          cp .env.example .env
-          php artisan key:generate --no-interaction
           npm ci
-          LARAVEL_BYPASS_ENV_CHECK=1 npm test
-          npm run build
-          php artisan test --compact
+          bash -euv -o pipefail <<< "$TEST_COMMANDS"
           composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
           rm -f .env bootstrap/cache/*.php
 
@@ -140,12 +147,15 @@ jobs:
             --exclude='/public/storage' --exclude='/public/hot' \
             ./ "$remote:$release_path/"
 
-          connect bash -s -- "$PROJECT_PATH" "$release" "$PHP_VERSION" "$KEEP_RELEASES" <<'REMOTE'
+          before=$(printf '%s\n' "$BEFORE_ACTIVATION" | base64 -w0)
+          after=$(printf '%s\n' "$AFTER_ACTIVATION" | base64 -w0)
+          connect bash -s -- "$PROJECT_PATH" "$release" "$KEEP_RELEASES" "$before" "$after" <<'REMOTE'
           set -euo pipefail
           project=$1
           release="$project/releases/$2"
-          php="/usr/bin/php$3"
-          keep=$4
+          keep=$3
+          before=$(printf '%s\n' "$4" | base64 -d)
+          after=$(printf '%s\n' "$5" | base64 -d)
           exec 9>"$project/.deploy.lock"
           flock -w 300 9
           cd "$release"
@@ -156,14 +166,12 @@ jobs:
             rm -rf -- "$target"
             ln -s "$source" "$target"
           done
-          mkdir -p storage/framework/{cache/data,sessions,views} storage/logs bootstrap/cache
-
-          "$php" artisan package:discover --no-interaction
-          "$php" artisan storage:link --no-interaction
-          "$php" artisan migrate --force --no-interaction
+          echo "Running before-activation in $release"
+          bash -euv -o pipefail <<< "$before"
           ln -s "$release" "$project/.current-$2"
           mv -Tf "$project/.current-$2" "$project/current"
-          "$php" artisan queue:restart --no-interaction
+          echo "Running after-activation in $release"
+          bash -euv -o pipefail <<< "$after"
 
           # Keep the active release plus the configured number of previous releases.
           active=$(readlink -f "$project/current")
