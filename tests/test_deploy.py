@@ -10,12 +10,13 @@ script = textwrap.dedent(source.split('      - name: Deploy\n        run: |\n', 
 assert '  workflow_call:' in source
 assert '  push:' not in source
 assert 'setfacl' not in source
+assert "      exclude-paths:\n        type: string\n        default: ''" in source
 assert 'rsync -rltz --no-perms --chmod=ugo=rwX' in source
 assert subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True).returncode == 0
 remote = script.split("<<'REMOTE'\n")[1].rsplit('\nREMOTE', 1)[0]
 assert subprocess.run(['bash', '-n'], input=remote, text=True, capture_output=True).returncode == 0
 
-for case in ['success','shared_vendor','upload_failure','migration_failure','activation_failure','restart_failure','collision','keep_one','keep_five','empty_hooks','before_multiline_failure','after_multiline_failure','runtime_dependencies']:
+for case in ['success','shared_vendor','upload_failure','migration_failure','activation_failure','restart_failure','collision','keep_one','keep_five','empty_hooks','before_multiline_failure','after_multiline_failure','runtime_dependencies','no_exclusions']:
   with tempfile.TemporaryDirectory() as td:
     base=pathlib.Path(td); project=base/'project'; binary=base/'bin'; binary.mkdir()
     (project/'.release-template/bootstrap/cache').mkdir(parents=True)
@@ -40,7 +41,10 @@ for case in ['success','shared_vendor','upload_failure','migration_failure','act
       'rsync':'''#!/usr/bin/env python3
 import os,pathlib,sys
 if os.environ['CASE']=='upload_failure': sys.exit(23)
-assert ('--exclude=/node_modules/' in sys.argv) == (os.environ['CASE'] != 'runtime_dependencies')
+assert ('--exclude=/node_modules/' in sys.argv) == (os.environ['CASE'] not in ['runtime_dependencies', 'no_exclusions'])
+assert '--exclude=/.env*' in sys.argv
+assert '--exclude=/auth.json' in sys.argv
+if os.environ['CASE']=='no_exclusions': assert '--exclude=/tests/' not in sys.argv
 p=pathlib.Path(sys.argv[-1].split(':',1)[1]); (p/'public').mkdir(); (p/'vendor').mkdir(); (p/'vendor/autoload.php').write_text('built vendor'); (p/'bootstrap/cache').mkdir(parents=True, exist_ok=True)
 '''
     }
@@ -53,10 +57,11 @@ p=pathlib.Path(sys.argv[-1].split(':',1)[1]); (p/'public').mkdir(); (p/'vendor')
     if case=='before_multiline_failure': before='echo "quoted value: \'literal\' $PWD" > "$PROJECT_PATH/hook-start"\nfalse\ntouch "$PROJECT_PATH/should-not-exist"'
     if case=='after_multiline_failure': after='false\ntouch "$PROJECT_PATH/should-not-exist"'
     env.update(BEFORE_ACTIVATION=before, AFTER_ACTIVATION=after, EXCLUDE_PATHS='/tests/' if case=='runtime_dependencies' else '/node_modules/\n/tests/\n/.phpunit*')
+    if case=='no_exclusions': env['EXCLUDE_PATHS']=''
     result=subprocess.run(['bash'],input=script.replace('php="/usr/bin/php$3"', 'php="$MOCK_PHP"'),text=True,capture_output=True,env=env)
-    expected={'success':0,'shared_vendor':0,'upload_failure':23,'migration_failure':42,'activation_failure':43,'restart_failure':44,'collision':1,'keep_one':0,'keep_five':0,'empty_hooks':0,'before_multiline_failure':1,'after_multiline_failure':1,'runtime_dependencies':0}[case]
+    expected={'success':0,'shared_vendor':0,'upload_failure':23,'migration_failure':42,'activation_failure':43,'restart_failure':44,'collision':1,'keep_one':0,'keep_five':0,'empty_hooks':0,'before_multiline_failure':1,'after_multiline_failure':1,'runtime_dependencies':0,'no_exclusions':0}[case]
     assert result.returncode==expected,(case,result.returncode,result.stderr)
-    switched=case in ['success','shared_vendor','activation_failure','restart_failure','keep_one','keep_five','empty_hooks','after_multiline_failure','runtime_dependencies']
+    switched=case in ['success','shared_vendor','activation_failure','restart_failure','keep_one','keep_five','empty_hooks','after_multiline_failure','runtime_dependencies','no_exclusions']
     assert (project/'current').resolve()==(release if switched else project/'releases/20261001000000_1'),case
     assert (project/'shared/.env').read_text()=='SECRET=unchanged\n'
     assert (project/'shared/storage/upload').read_text()=='keep upload'
@@ -64,8 +69,8 @@ p=pathlib.Path(sys.argv[-1].split(':',1)[1]); (p/'public').mkdir(); (p/'vendor')
     if case in ['upload_failure','migration_failure','before_multiline_failure']:
       assert not release.exists(),case
     if case=='collision': assert (release/'sentinel').read_text()=='existing'
-    assert (project/'restart-observed').exists() == (case in ['success','shared_vendor','restart_failure','keep_one','keep_five','runtime_dependencies']),case
-    if case in ['success','shared_vendor','keep_one','keep_five','empty_hooks','runtime_dependencies']:
+    assert (project/'restart-observed').exists() == (case in ['success','shared_vendor','restart_failure','keep_one','keep_five','runtime_dependencies','no_exclusions']),case
+    if case in ['success','shared_vendor','keep_one','keep_five','empty_hooks','runtime_dependencies','no_exclusions']:
       assert len(list((project/'releases').iterdir()))==int(env['KEEP_RELEASES'])
       assert (release/'.env').resolve()==project/'shared/.env'
       assert (release/'storage').resolve()==project/'shared/storage'
