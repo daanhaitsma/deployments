@@ -22,7 +22,9 @@ if ! sudo test -d "$project/shared/storage"; then
 fi
 
 sudo mkdir -p "$project/releases" "$project/.release-template/bootstrap/cache"
-sudo chown -R "$account:$group" "$project"
+# Preserve runtime file owners: PHP may need to update their timestamps.
+sudo find "$project" -path "$project/shared/storage" -prune -o \
+  -exec chown -h "$account:$group" {} +
 
 # Existing code: the account can maintain it; PHP may only read it.
 sudo setfacl -R -m "u:$account:rwX,u:$web_user:r-X" "$project"
