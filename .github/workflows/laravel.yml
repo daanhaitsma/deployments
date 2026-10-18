@@ -30,9 +30,19 @@ on:
       exclude-paths:
         type: string
         default: ''
+      install-commands:
+        description: 'Dependency installation before caching. CACHE_HIT is true when dependencies were restored. Use an empty string to skip.'
+        type: string
+        default: |
+          composer install --prefer-dist --no-progress
+          if [[ "$CACHE_HIT" != true ]]; then npm ci; fi
       test-commands:
         type: string
         required: true
+      after-test-commands:
+        description: 'Commands after successful tests and before upload. Use an empty string to skip.'
+        type: string
+        default: composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
       before-activation:
         type: string
         default: ''
@@ -87,9 +97,12 @@ jobs:
 
       - name: Runtime cache key
         id: runtime
+        env:
+          INSTALL_COMMANDS: ${{ inputs.install-commands }}
         run: |
           echo "php=$(php -r 'echo PHP_VERSION;')" >> "$GITHUB_OUTPUT"
           echo "node=$(node --version)" >> "$GITHUB_OUTPUT"
+          echo "install=$(printf '%s' "$INSTALL_COMMANDS" | sha256sum | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/restore@v5
         id: dependencies
@@ -97,14 +110,14 @@ jobs:
           path: |
             vendor
             node_modules
-          key: dependencies-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.php }}-${{ steps.runtime.outputs.node }}-${{ hashFiles('composer.lock', 'composer.json', 'package-lock.json', 'package.json') }}
+          key: dependencies-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.runtime.outputs.php }}-${{ steps.runtime.outputs.node }}-${{ steps.runtime.outputs.install }}-${{ hashFiles('composer.lock', 'composer.json', 'package-lock.json', 'package.json') }}
 
       - name: Install dependencies
         env:
           CACHE_HIT: ${{ steps.dependencies.outputs.cache-hit }}
+          INSTALL_COMMANDS: ${{ inputs.install-commands }}
         run: |
-          composer install --prefer-dist --no-progress
-          if [[ "$CACHE_HIT" != true ]]; then npm ci; fi
+          bash -euv -o pipefail <<< "$INSTALL_COMMANDS"
 
       - uses: actions/cache/save@v5
         if: steps.dependencies.outputs.cache-hit != 'true'
@@ -117,6 +130,7 @@ jobs:
       - name: Test and build
         env:
           TEST_COMMANDS: ${{ inputs.test-commands }}
+          AFTER_TEST_COMMANDS: ${{ inputs.after-test-commands }}
           APP_ENV: testing
           CACHE_STORE: array
           SESSION_DRIVER: array
@@ -127,7 +141,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -euv -o pipefail <<< "$TEST_COMMANDS"
-          composer install --no-dev --prefer-dist --no-progress --optimize-autoloader --no-scripts
+          bash -euv -o pipefail <<< "$AFTER_TEST_COMMANDS"
           rm -f .env bootstrap/cache/*.php
 
       - uses: webfactory/ssh-agent@v0.10.0
