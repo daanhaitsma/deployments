@@ -221,12 +221,12 @@ jobs:
           bash -euv -o pipefail <<< "$after"
 
           # Keep the active release plus the configured number of previous releases.
+          # Plain pipe instead of process substitution: some shared hosts have no /dev/fd.
           active=$(readlink -f "$project/current")
-          mapfile -t old < <(
-            find "$project/releases" -mindepth 1 -maxdepth 1 -type d \
-              ! -path "$active" -printf '%T@ %f\n' | sort -nr | cut -d ' ' -f 2-
-          )
-          for name in "${old[@]:$((keep - 1))}"; do
-            rm -rf -- "$project/releases/$name"
-          done
+          find "$project/releases" -mindepth 1 -maxdepth 1 -type d \
+            ! -path "$active" -printf '%T@ %f\n' | sort -nr | cut -d ' ' -f 2- |
+            tail -n +"$keep" |
+            while IFS= read -r name; do
+              if [ -n "$name" ]; then rm -rf -- "$project/releases/$name"; fi
+            done
           REMOTE
